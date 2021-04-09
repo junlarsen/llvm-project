@@ -15,6 +15,7 @@
 using namespace llvm;
 
 class OrcCAPIExecutionTest : public testing::Test, public OrcExecutionTest {};
+void materializationUnitFn() {}
 
 TEST(OrcCAPITest, SymbolStringPoolUniquing) {
   LLVMInitializeNativeTarget();
@@ -55,6 +56,37 @@ TEST(OrcCAPITest, JITDylibLookup) {
   LLVMOrcJITDylibRef L2 = LLVMOrcExecutionSessionGetJITDylibByName(ES, "test");
   ASSERT_EQ(L1, L2) << "Located JIT Dylib is not equal to original";
   LLVMOrcDisposeLLJIT(Jit);
+}
+
+TEST(OrcCAPITest, MaterializationUnitCreation) {
+  LLVMInitializeNativeTarget();
+  LLVMOrcLLJITRef Jit;
+  LLVMOrcLLJITBuilderRef Builder = LLVMOrcCreateLLJITBuilder();
+  if (LLVMErrorRef E = LLVMOrcCreateLLJIT(&Jit, Builder)) {
+    char *Msg = LLVMGetErrorMessage(E);
+    ADD_FAILURE() << "Failed to initialize OrcJIT: " << Msg;
+    LLVMDisposeErrorMessage(Msg);
+    return;
+  }
+  LLVMOrcExecutionSessionRef ES = LLVMOrcLLJITGetExecutionSession(Jit);
+  LLVMOrcJITDylibRef Dylib = LLVMOrcLLJITGetMainJITDylib(Jit);
+  LLVMOrcSymbolStringPoolEntryRef Name =
+      LLVMOrcExecutionSessionIntern(ES, "test");
+  LLVMJITSymbolFlags Flags = {LLVMJITSymbolGenericFlagsWeak, 0};
+  LLVMOrcJITTargetAddress Addr = (intptr_t)(&materializationUnitFn);
+  LLVMJITEvaluatedSymbol Sym = {Addr, Flags};
+  LLVMJITCSymbolMapPair Pair = {Name, Sym};
+  LLVMJITCSymbolMapPair Pairs[] = {Pair};
+  LLVMOrcMaterializationUnitRef MU = LLVMOrcAbsoluteSymbols(Pairs, 1);
+  LLVMOrcJITDylibDefine(Dylib, MU);
+  LLVMOrcJITTargetAddress OutAddr;
+  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &OutAddr, "test")) {
+    char *Msg = LLVMGetErrorMessage(E);
+    ADD_FAILURE() << "Failed to look up symbol named \"test\" in JIT: " << Msg;
+    LLVMDisposeErrorMessage(Msg);
+    return;
+  }
+  ASSERT_EQ(Addr, OutAddr);
 }
 
 TEST_F(OrcCAPIExecutionTest, ExecutionTest) {
