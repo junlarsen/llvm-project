@@ -14,17 +14,22 @@
 
 using namespace llvm;
 
-class OrcCAPIExecutionTest : public testing::Test, public OrcExecutionTest {};
-void materializationUnitFn() {}
+class OrcCAPITestBase : public testing::Test, public OrcExecutionTest {
+protected:
+  void reportError(LLVMErrorRef E, const char *Description) {
+    char *Message = LLVMGetErrorMessage(E);
+    ADD_FAILURE() << Description << ": " << Message;
+    LLVMDisposeErrorMessage(Message);
+  }
+  static void materializationUnitFn() {}
+};
 
-TEST(OrcCAPITest, SymbolStringPoolUniquing) {
+TEST_F(OrcCAPITestBase, SymbolStringPoolUniquing) {
   LLVMInitializeNativeTarget();
   LLVMOrcLLJITRef Jit;
   LLVMOrcLLJITBuilderRef Builder = LLVMOrcCreateLLJITBuilder();
   if (LLVMErrorRef E = LLVMOrcCreateLLJIT(&Jit, Builder)) {
-    char *Msg = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << "Failed to initialize OrcJIT: " << Msg;
-    LLVMDisposeErrorMessage(Msg);
+    reportError(E, "Failed to initialize JIT");
     return;
   }
   LLVMOrcExecutionSessionRef ES = LLVMOrcLLJITGetExecutionSession(Jit);
@@ -35,17 +40,18 @@ TEST(OrcCAPITest, SymbolStringPoolUniquing) {
   ASSERT_EQ(E1, E2) << "String pool entries are not unique";
   ASSERT_NE(E1, E3) << "Unique symbol pool entries are equal";
   ASSERT_STREQ("aaa", SymbolName) << "String value of symbol is not equal";
+  LLVMOrcReleaseSymbolStringPoolEntry(E1);
+  LLVMOrcReleaseSymbolStringPoolEntry(E2);
+  LLVMOrcReleaseSymbolStringPoolEntry(E3);
   LLVMOrcDisposeLLJIT(Jit);
 }
 
-TEST(OrcCAPITest, JITDylibLookup) {
+TEST_F(OrcCAPITestBase, JITDylibLookup) {
   LLVMInitializeNativeTarget();
   LLVMOrcLLJITRef Jit;
   LLVMOrcLLJITBuilderRef Builder = LLVMOrcCreateLLJITBuilder();
   if (LLVMErrorRef E = LLVMOrcCreateLLJIT(&Jit, Builder)) {
-    char *Msg = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << "Failed to initialize OrcJIT: " << Msg;
-    LLVMDisposeErrorMessage(Msg);
+    reportError(E, "Failed to initialize JIT");
     return;
   }
   LLVMOrcExecutionSessionRef ES = LLVMOrcLLJITGetExecutionSession(Jit);
@@ -58,14 +64,12 @@ TEST(OrcCAPITest, JITDylibLookup) {
   LLVMOrcDisposeLLJIT(Jit);
 }
 
-TEST(OrcCAPITest, MaterializationUnitCreation) {
+TEST_F(OrcCAPITestBase, MaterializationUnitCreation) {
   LLVMInitializeNativeTarget();
   LLVMOrcLLJITRef Jit;
   LLVMOrcLLJITBuilderRef Builder = LLVMOrcCreateLLJITBuilder();
   if (LLVMErrorRef E = LLVMOrcCreateLLJIT(&Jit, Builder)) {
-    char *Msg = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << "Failed to initialize OrcJIT: " << Msg;
-    LLVMDisposeErrorMessage(Msg);
+    reportError(E, "Failed to initialize JIT");
     return;
   }
   LLVMOrcExecutionSessionRef ES = LLVMOrcLLJITGetExecutionSession(Jit);
@@ -81,15 +85,13 @@ TEST(OrcCAPITest, MaterializationUnitCreation) {
   LLVMOrcJITDylibDefine(Dylib, MU);
   LLVMOrcJITTargetAddress OutAddr;
   if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &OutAddr, "test")) {
-    char *Msg = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << "Failed to look up symbol named \"test\" in JIT: " << Msg;
-    LLVMDisposeErrorMessage(Msg);
+    reportError(E, "Failed to look up symbol named \"test\" in main Dylib");
     return;
   }
   ASSERT_EQ(Addr, OutAddr);
 }
 
-TEST_F(OrcCAPIExecutionTest, ExecutionTest) {
+TEST_F(OrcCAPITestBase, ExecutionTest) {
   if (!SupportsJIT)
     return;
 
@@ -100,7 +102,8 @@ TEST_F(OrcCAPIExecutionTest, ExecutionTest) {
   char *Msg = 0;
   LLVMTargetRef Target;
   if (LLVMGetTargetFromTriple(Triple, &Target, &Msg)) {
-    ADD_FAILURE() << "Failed to retrieve target from triple: " << Triple;
+    ADD_FAILURE() << "Failed to retrieve target from triple " << Triple << ": "
+                  << Msg;
     return;
   }
   LLVMTargetMachineRef TM = LLVMCreateTargetMachine(
@@ -109,9 +112,7 @@ TEST_F(OrcCAPIExecutionTest, ExecutionTest) {
   LLVMOrcJITTargetMachineBuilderRef TMB =
       LLVMOrcJITTargetMachineBuilderCreateFromTargetMachine(TM);
   if (LLVMErrorRef E = LLVMOrcJITTargetMachineBuilderDetectHost(&TMB)) {
-    char *Err = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << "Failed to detect host from TMB: " << Err;
-    LLVMDisposeErrorMessage(Err);
+    reportError(E, "Failed to detect host target from TargetMachineBuilder");
     LLVMOrcDisposeJITTargetMachineBuilder(TMB);
     LLVMDisposeTargetMachine(TM);
     return;
@@ -141,17 +142,13 @@ TEST_F(OrcCAPIExecutionTest, ExecutionTest) {
   LLVMOrcThreadSafeModuleRef TSM = LLVMOrcCreateNewThreadSafeModule(Mod, TSC);
   LLVMOrcJITDylibRef MainDylib = LLVMOrcLLJITGetMainJITDylib(Jit);
   if (LLVMErrorRef E = LLVMOrcLLJITAddLLVMIRModule(Jit, MainDylib, TSM)) {
-    char *Err = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << "Failed to add LLVM ir module to LLJIT: " << Err;
-    LLVMDisposeErrorMessage(Err);
+    reportError(E, "Failed to add LLVM IR module to LLJIT");
     LLVMOrcDisposeLLJIT(Jit);
     return;
   }
   LLVMOrcJITTargetAddress TestFnAddr;
   if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &TestFnAddr, "sum")) {
-    char *Err = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << "Failed to locate \"sum\" symbol: " << Err;
-    LLVMDisposeErrorMessage(Err);
+    reportError(E, "Failed to locate \"sum\" symbol");
     LLVMOrcDisposeLLJIT(Jit);
     return;
   }
