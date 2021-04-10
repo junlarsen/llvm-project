@@ -89,6 +89,64 @@ TEST_F(OrcCAPITestBase, MaterializationUnitCreation) {
     return;
   }
   ASSERT_EQ(Addr, OutAddr);
+  LLVMOrcReleaseSymbolStringPoolEntry(Name);
+  LLVMOrcDisposeLLJIT(Jit);
+}
+
+TEST_F(OrcCAPITestBase, ResourceTrackerDefinitionLifetime) {
+  // This test case ensures that all symbols loaded into a JITDylib with a
+  // ResourceTracker attached are cleared from the JITDylib once the RT is
+  // removed.
+  LLVMInitializeNativeTarget();
+  LLVMOrcLLJITRef Jit;
+  LLVMOrcLLJITBuilderRef Builder = LLVMOrcCreateLLJITBuilder();
+  if (LLVMErrorRef E = LLVMOrcCreateLLJIT(&Jit, Builder)) {
+    reportError(E, "Failed to initialize JIT");
+    return;
+  }
+  LLVMOrcJITDylibRef MainDylib = LLVMOrcLLJITGetMainJITDylib(Jit);
+  LLVMOrcResourceTrackerRef RT =
+      LLVMOrcJITDylibCreateResourceTracker(MainDylib);
+  LLVMOrcThreadSafeContextRef TSC = LLVMOrcCreateNewThreadSafeContext();
+  LLVMContextRef Ctx = LLVMOrcThreadSafeContextGetContext(TSC);
+  LLVMModuleRef Mod = LLVMModuleCreateWithNameInContext("test", Ctx);
+  {
+    LLVMTypeRef VoidType = LLVMVoidTypeInContext(Ctx);
+    LLVMTypeRef FuncTy = LLVMFunctionType(VoidType, {}, 0, 0);
+    LLVMValueRef Func = LLVMAddFunction(Mod, "test", FuncTy);
+    LLVMBuilderRef IRBuilder = LLVMCreateBuilderInContext(Ctx);
+    LLVMBasicBlockRef EntryBB = LLVMAppendBasicBlock(Func, "entry");
+    LLVMPositionBuilderAtEnd(IRBuilder, EntryBB);
+    LLVMBuildRetVoid(IRBuilder);
+    LLVMDisposeBuilder(IRBuilder);
+  }
+  LLVMOrcThreadSafeModuleRef TSM = LLVMOrcCreateNewThreadSafeModule(Mod, TSC);
+  if (LLVMErrorRef E = LLVMOrcLLJITAddLLVMIRModuleWithRT(Jit, RT, TSM)) {
+    reportError(E, "Failed to add LLVM IR module to LLJIT");
+    LLVMOrcDisposeLLJIT(Jit);
+    return;
+  }
+  LLVMOrcJITTargetAddress TestFnAddr;
+  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &TestFnAddr, "test")) {
+    reportError(E, "Failed to locate \"sum\" symbol");
+    LLVMOrcDisposeLLJIT(Jit);
+    return;
+  }
+  ASSERT_TRUE(!!TestFnAddr);
+  LLVMOrcResourceTrackerRemove(RT);
+  LLVMOrcJITTargetAddress OutAddr;
+  LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &OutAddr, "test");
+  ASSERT_TRUE(!!E);
+  ASSERT_FALSE(!!OutAddr);
+  LLVMOrcExecutionSessionRef ES = LLVMOrcLLJITGetExecutionSession(Jit);
+  // FIXME: Provide a better way of clearing dangling references in
+  //  SymbolStringPool from external items like LLVM IR modules. The function
+  //  names are interned upon load, but never released
+  LLVMOrcSymbolStringPoolEntryRef Name =
+      LLVMOrcExecutionSessionIntern(ES, "test");
+  LLVMOrcReleaseSymbolStringPoolEntry(Name);
+  LLVMOrcReleaseSymbolStringPoolEntry(Name);
+  LLVMOrcDisposeLLJIT(Jit);
 }
 
 TEST_F(OrcCAPITestBase, ExecutionTest) {
@@ -138,6 +196,7 @@ TEST_F(OrcCAPITestBase, ExecutionTest) {
     LLVMValueRef Arg2 = LLVMGetParam(TestFn, 1);
     LLVMValueRef Sum = LLVMBuildAdd(IRBuilder, Arg1, Arg2, "");
     LLVMBuildRet(IRBuilder, Sum);
+    LLVMDisposeBuilder(IRBuilder);
   }
   LLVMOrcThreadSafeModuleRef TSM = LLVMOrcCreateNewThreadSafeModule(Mod, TSC);
   LLVMOrcJITDylibRef MainDylib = LLVMOrcLLJITGetMainJITDylib(Jit);
