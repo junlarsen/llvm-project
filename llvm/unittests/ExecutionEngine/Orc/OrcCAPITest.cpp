@@ -174,9 +174,9 @@ TEST_F(OrcCAPITestBase, ResourceTrackerDefinitionLifetime) {
   ASSERT_TRUE(!!TestFnAddr);
   LLVMOrcResourceTrackerRemove(RT);
   LLVMOrcJITTargetAddress OutAddr;
-  LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &OutAddr, "sum");
-  ASSERT_TRUE(!!E);
-  ASSERT_FALSE(!!OutAddr);
+  LLVMErrorRef Err = LLVMOrcLLJITLookup(Jit, &OutAddr, "sum");
+  ASSERT_TRUE(Err);
+  ASSERT_FALSE(OutAddr);
   LLVMOrcExecutionSessionRef ES = LLVMOrcLLJITGetExecutionSession(Jit);
   // FIXME: Provide a better way of clearing dangling references in
   //  SymbolStringPool from implicit calls
@@ -186,11 +186,32 @@ TEST_F(OrcCAPITestBase, ResourceTrackerDefinitionLifetime) {
   LLVMOrcReleaseSymbolStringPoolEntry(Name);
 }
 
+TEST_F(OrcCAPITestBase, ResourceTrackerTransfer) {
+  LLVMOrcResourceTrackerRef DefaultRT =
+      LLVMOrcJITDylibGetDefaultResourceTracker(MainDylib);
+  LLVMOrcResourceTrackerRef RT2 =
+      LLVMOrcJITDylibCreateResourceTracker(MainDylib);
+  LLVMOrcThreadSafeModuleRef TSM = createTestModule();
+  if (LLVMErrorRef E = LLVMOrcLLJITAddLLVMIRModuleWithRT(Jit, DefaultRT, TSM)) {
+    reportError(E, "Failed to add LLVM IR module to LLJIT");
+    return;
+  }
+  LLVMOrcJITTargetAddress Addr;
+  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &Addr, "sum")) {
+    reportError(E, "Failed to locate \"sum\" symbol");
+    return;
+  }
+  LLVMOrcResourceTrackerTransferTo(DefaultRT, RT2);
+  LLVMErrorRef Err = LLVMOrcLLJITLookup(Jit, &Addr, "sum");
+  ASSERT_FALSE(Err);
+  LLVMOrcReleaseResourceTracker(RT2);
+}
+
 TEST_F(OrcCAPITestBase, ExecutionTest) {
   if (!SupportsJIT)
     return;
 
-  using SumFunctionType = int32_t(*)(int32_t, int32_t);
+  using SumFunctionType = int32_t (*)(int32_t, int32_t);
 
   // This test performs OrcJIT compilation of a simple sum module
   LLVMInitializeNativeAsmPrinter();
