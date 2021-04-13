@@ -22,6 +22,26 @@ protected:
     LLVMDisposeErrorMessage(Message);
   }
   static void materializationUnitFn() {}
+  // Stub definition generator, where all Names are materialized from the
+  // materializationUnitFn() test function and defined into the JIT Dylib
+  static LLVMErrorRef
+  definitionGeneratorFn(LLVMOrcDefinitionGeneratorRef G, void *Ctx,
+                        LLVMOrcLookupStateRef *LS, LLVMOrcLookupKind K,
+                        LLVMOrcJITDylibRef JD, LLVMOrcJITDylibLookupFlags F,
+                        LLVMOrcCLookupSet Names, size_t NamesCount) {
+    for (size_t I = 0; I < NamesCount; I++) {
+      LLVMOrcCLookupSetElement Element = Names[I];
+      LLVMOrcJITTargetAddress Addr =
+          (LLVMOrcJITTargetAddress)(&materializationUnitFn);
+      LLVMJITSymbolFlags Flags = {LLVMJITSymbolGenericFlagsWeak, 0};
+      LLVMJITEvaluatedSymbol Sym = {Addr, Flags};
+      LLVMJITCSymbolMapPair Pair = {Element.Name, Sym};
+      LLVMJITCSymbolMapPair Pairs[] = {Pair};
+      LLVMOrcMaterializationUnitRef MU = LLVMOrcAbsoluteSymbols(Pairs, 1);
+      LLVMOrcJITDylibDefine(JD, MU);
+    }
+    return LLVMErrorSuccess;
+  }
 };
 
 TEST_F(OrcCAPITestBase, SymbolStringPoolUniquing) {
@@ -77,7 +97,8 @@ TEST_F(OrcCAPITestBase, MaterializationUnitCreation) {
   LLVMOrcSymbolStringPoolEntryRef Name =
       LLVMOrcExecutionSessionIntern(ES, "test");
   LLVMJITSymbolFlags Flags = {LLVMJITSymbolGenericFlagsWeak, 0};
-  LLVMOrcJITTargetAddress Addr = (intptr_t)(&materializationUnitFn);
+  LLVMOrcJITTargetAddress Addr =
+      (LLVMOrcJITTargetAddress)(&materializationUnitFn);
   LLVMJITEvaluatedSymbol Sym = {Addr, Flags};
   LLVMJITCSymbolMapPair Pair = {Name, Sym};
   LLVMJITCSymbolMapPair Pairs[] = {Pair};
@@ -90,6 +111,30 @@ TEST_F(OrcCAPITestBase, MaterializationUnitCreation) {
   }
   ASSERT_EQ(Addr, OutAddr);
   LLVMOrcReleaseSymbolStringPoolEntry(Name);
+  LLVMOrcDisposeLLJIT(Jit);
+}
+
+TEST_F(OrcCAPITestBase, DefinitionGenerators) {
+  LLVMInitializeNativeTarget();
+  LLVMOrcLLJITRef Jit;
+  LLVMOrcLLJITBuilderRef Builder = LLVMOrcCreateLLJITBuilder();
+  if (LLVMErrorRef E = LLVMOrcCreateLLJIT(&Jit, Builder)) {
+    reportError(E, "Failed to initialize JIT");
+    return;
+  }
+  LLVMOrcJITDylibRef MainDylib = LLVMOrcLLJITGetMainJITDylib(Jit);
+  LLVMOrcDefinitionGeneratorRef Gen =
+      LLVMOrcCreateCustomCAPIDefinitionGenerator(&definitionGeneratorFn,
+                                                 nullptr);
+  LLVMOrcJITDylibAddGenerator(MainDylib, Gen);
+  LLVMOrcJITTargetAddress OutAddr;
+  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &OutAddr, "test")) {
+    reportError(E, "Symbol \"test\" was not generated from Dylib Generator");
+    return;
+  }
+  LLVMOrcJITTargetAddress ExpectedAddr =
+      (LLVMOrcJITTargetAddress)(&materializationUnitFn);
+  ASSERT_EQ(ExpectedAddr, OutAddr);
   LLVMOrcDisposeLLJIT(Jit);
 }
 
@@ -140,8 +185,7 @@ TEST_F(OrcCAPITestBase, ResourceTrackerDefinitionLifetime) {
   ASSERT_FALSE(!!OutAddr);
   LLVMOrcExecutionSessionRef ES = LLVMOrcLLJITGetExecutionSession(Jit);
   // FIXME: Provide a better way of clearing dangling references in
-  //  SymbolStringPool from external items like LLVM IR modules. The function
-  //  names are interned upon load, but never released
+  //  SymbolStringPool from implicit calls
   LLVMOrcSymbolStringPoolEntryRef Name =
       LLVMOrcExecutionSessionIntern(ES, "test");
   LLVMOrcReleaseSymbolStringPoolEntry(Name);
