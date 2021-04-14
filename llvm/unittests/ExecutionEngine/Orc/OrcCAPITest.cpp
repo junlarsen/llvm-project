@@ -20,33 +20,32 @@ using namespace llvm;
 // 1. Jit: an LLVMOrcLLJIT instance which is freed upon test exit
 // 2. ExecutionSession: the LLVMOrcExecutionSession for the JIT
 // 3. MainDylib: the main JITDylib for the LLJIT instance
-// 4. reportError: helper method for reporting an LLVMErrorRef to GTest
-// 5. materializationUnitFn: function pointer to an empty function, used for
+// 4. materializationUnitFn: function pointer to an empty function, used for
 //                           materialization unit testing
-// 6. definitionGeneratorFn: function pointer for a basic
+// 5. definitionGeneratorFn: function pointer for a basic
 //                           LLVMOrcCAPIDefinitionGeneratorTryToGenerateFunction
-// 7. createTestModule: helper method for creating a basic thread-safe-module
+// 6. createTestModule: helper method for creating a basic thread-safe-module
 class OrcCAPITestBase : public testing::Test, public OrcExecutionTest {
 protected:
   LLVMOrcLLJITRef Jit;
   LLVMOrcExecutionSessionRef ExecutionSession;
   LLVMOrcJITDylibRef MainDylib;
-  OrcCAPITestBase() {
+
+public:
+  void SetUp() override {
     LLVMInitializeNativeTarget();
     LLVMOrcLLJITBuilderRef Builder = LLVMOrcCreateLLJITBuilder();
     if (LLVMErrorRef E = LLVMOrcCreateLLJIT(&Jit, Builder)) {
-      reportError(E, "Failed to create LLJIT");
-      return;
+      char *Message = LLVMGetErrorMessage(E);
+      FAIL() << "Failed to create LLJIT - This should never fail"
+             << " -- " << Message;
     }
     ExecutionSession = LLVMOrcLLJITGetExecutionSession(Jit);
     MainDylib = LLVMOrcLLJITGetMainJITDylib(Jit);
   }
-  ~OrcCAPITestBase() { LLVMOrcDisposeLLJIT(Jit); }
-  void reportError(LLVMErrorRef E, const char *Description) {
-    char *Message = LLVMGetErrorMessage(E);
-    ADD_FAILURE() << Description << ": " << Message;
-    LLVMDisposeErrorMessage(Message);
-  }
+  void TearDown() override { LLVMOrcDisposeLLJIT(Jit); }
+
+protected:
   static void materializationUnitFn() {}
   // Stub definition generator, where all Names are materialized from the
   // materializationUnitFn() test function and defined into the JIT Dylib
@@ -132,9 +131,8 @@ TEST_F(OrcCAPITestBase, MaterializationUnitCreation) {
   LLVMOrcMaterializationUnitRef MU = LLVMOrcAbsoluteSymbols(Pairs, 1);
   LLVMOrcJITDylibDefine(MainDylib, MU);
   LLVMOrcJITTargetAddress OutAddr;
-  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &OutAddr, "test")) {
-    reportError(E, "Failed to look up symbol named \"test\" in main Dylib");
-    return;
+  if (LLVMOrcLLJITLookup(Jit, &OutAddr, "test")) {
+    FAIL() << "Failed to look up \"test\" symbol";
   }
   ASSERT_EQ(Addr, OutAddr);
   LLVMOrcReleaseSymbolStringPoolEntry(Name);
@@ -146,9 +144,8 @@ TEST_F(OrcCAPITestBase, DefinitionGenerators) {
                                                  nullptr);
   LLVMOrcJITDylibAddGenerator(MainDylib, Gen);
   LLVMOrcJITTargetAddress OutAddr;
-  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &OutAddr, "test")) {
-    reportError(E, "Symbol \"test\" was not generated from Dylib Generator");
-    return;
+  if (LLVMOrcLLJITLookup(Jit, &OutAddr, "test")) {
+    FAIL() << "The DefinitionGenerator did not create symbol \"test\"";
   }
   LLVMOrcJITTargetAddress ExpectedAddr =
       (LLVMOrcJITTargetAddress)(&materializationUnitFn);
@@ -163,13 +160,11 @@ TEST_F(OrcCAPITestBase, ResourceTrackerDefinitionLifetime) {
       LLVMOrcJITDylibCreateResourceTracker(MainDylib);
   LLVMOrcThreadSafeModuleRef TSM = createTestModule();
   if (LLVMErrorRef E = LLVMOrcLLJITAddLLVMIRModuleWithRT(Jit, RT, TSM)) {
-    reportError(E, "Failed to add LLVM IR module to LLJIT");
-    return;
+    FAIL() << "Failed to add LLVM IR module to LLJIT";
   }
   LLVMOrcJITTargetAddress TestFnAddr;
-  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &TestFnAddr, "sum")) {
-    reportError(E, "Failed to locate \"sum\" symbol");
-    return;
+  if (LLVMOrcLLJITLookup(Jit, &TestFnAddr, "sum")) {
+    FAIL() << "Symbol \"sum\" was not added into JIT";
   }
   ASSERT_TRUE(!!TestFnAddr);
   LLVMOrcResourceTrackerRemove(RT);
@@ -193,13 +188,11 @@ TEST_F(OrcCAPITestBase, ResourceTrackerTransfer) {
       LLVMOrcJITDylibCreateResourceTracker(MainDylib);
   LLVMOrcThreadSafeModuleRef TSM = createTestModule();
   if (LLVMErrorRef E = LLVMOrcLLJITAddLLVMIRModuleWithRT(Jit, DefaultRT, TSM)) {
-    reportError(E, "Failed to add LLVM IR module to LLJIT");
-    return;
+    FAIL() << "Failed to add LLVM IR module to LLJIT";
   }
   LLVMOrcJITTargetAddress Addr;
-  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &Addr, "sum")) {
-    reportError(E, "Failed to locate \"sum\" symbol");
-    return;
+  if (LLVMOrcLLJITLookup(Jit, &Addr, "sum")) {
+    FAIL() << "Symbol \"sum\" was not added into JIT";
   }
   LLVMOrcResourceTrackerTransferTo(DefaultRT, RT2);
   LLVMErrorRef Err = LLVMOrcLLJITLookup(Jit, &Addr, "sum");
@@ -217,13 +210,11 @@ TEST_F(OrcCAPITestBase, ExecutionTest) {
   LLVMInitializeNativeAsmPrinter();
   LLVMOrcThreadSafeModuleRef TSM = createTestModule();
   if (LLVMErrorRef E = LLVMOrcLLJITAddLLVMIRModule(Jit, MainDylib, TSM)) {
-    reportError(E, "Failed to add LLVM IR module to LLJIT");
-    return;
+    FAIL() << "Failed to add LLVM IR module to LLJIT";
   }
   LLVMOrcJITTargetAddress TestFnAddr;
-  if (LLVMErrorRef E = LLVMOrcLLJITLookup(Jit, &TestFnAddr, "sum")) {
-    reportError(E, "Failed to locate \"sum\" symbol");
-    return;
+  if (LLVMOrcLLJITLookup(Jit, &TestFnAddr, "sum")) {
+    FAIL() << "Symbol \"sum\" was not added into JIT";
   }
   auto *SumFn = (SumFunctionType)(TestFnAddr);
   int32_t Result = SumFn(1, 1);
